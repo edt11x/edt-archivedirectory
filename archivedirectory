@@ -1,0 +1,350 @@
+#!/bin/bash
+# bail out on any failure, we do not want a bad archive
+set -e
+
+die() {
+    set +x
+    echo >&2 "$@"
+    usage
+    exit 1
+}
+
+function usage {
+    set +x
+    echo "Usage: archivedirectory [-d dest_dir] [-p prefix] [-e] [-n] dir_or_file_to_archive"
+    exit 1
+}
+
+function man {
+    set +x
+    cat << MANUAL_PAGE
+NAME
+
+    archivedirectory - archive the specified directory or file
+
+SYNOPSIS
+
+    archivedirectory [-d dest_dir] [-p prefix] [-e] [-n] dir_or_file_to_archive
+
+    -d directory -- specify the destination dir to place the archive
+    -e -- encrypt the archive, otherwise just tar and forward ECC
+    -n -- nice the processes, some processes are intensive
+    -p prefix_name -- add a prefix name to the archive
+
+DESCRIPTION
+
+This function archives a directory or file. Goals for this tool:
+
+    * Create archives that can be extracted across Windows, Mac and Linux
+    * Encrypt the data at rest
+    * Provide some level of corruption resistance
+    * Use widely supported, cross platform tools
+
+** Create archives that can be extracted across Windows, Mac and Linux **
+
+I am mostly a Mac and Linux user, but at work we develop under Windows and
+Linux, I want an archiving strategy that will work on all three platforms.
+
+** Encrypt the data at rest **
+
+Everybody is getting breached. All data should be encrypted at rest giving a
+better chance of not being exposed.
+
+** Provide some level of corruption resistance **
+
+Bitrot, copy errors are real problems, we need a way to guard and test against
+corruption. More commonly, I experience a never ending battle with tools and
+utilities that want to convert line endings from Windows to Linux format, or
+case insensitive file systems that cause problems with case sensitive file
+names.  Another one is symbolic links. Windows has three different mechanisms
+for symbolic links, dot lnk files, junctions and NTFS symbolic links. Cygwin
+which runs on Windows, uses none of these, but choses to invent its own.
+Subversion on Linux will correctly save and extract symbolic links, but on
+Windows invents its own format, which is none of the three formats that Windows
+supports, nor the Cygwin on Windows format. When I move archives from Windows
+to Linux or vice versa, I do not want files renamed, or converted, or extra
+files inserted in the directories such as .DS_Store, etc. Another one I have
+encountered, is I like to copy around my vim configuration files. I put my vim
+config up on github to make it easy to grab. But the vim packages have git
+repositories in them which agrevates git. Taring all the vim files together
+prevents git from discovering the other git files.
+
+** Tool choices **
+
+The Zip file format is largely portable across Windows, Mac and Linux, but I
+have had problems extracting complicated zip archives on Linux, finding that I
+could not extract some directories or files. Zip files abillity to correctly
+restore file attributes like ownership and mode is also less supported on
+Linux. WinZip on the other hand does understand tar files and tar is native to
+Mac and Linux systems. Tar is the chosen common format. 
+
+With all the malware, comprimises, etc. I think all data needs to be encrypted
+at rest. You can not know if a computer or network has been comprimised. The
+F-35, OPM, and Anthem data breaches are all good examples for me personally.
+You have to assume that all networks are comprimised. Also, people lose thumb
+drives and computers all the time. GPG is widely available and known for good
+encryption and is available across Windows, Mac, and Linux.
+
+For corruption resistance, I have a large number of computers that I deal with
+and two that are actively used, one Windows 7 and one Linux, are corrupting
+sectors at a very low rate, low enough on the Windows 7 box that the
+sysadmins do not care. Yet blocks in the middle of large text log files are
+being replaced with all 0xFFs. Based on experience, it is prudent to assume
+any file system could be corrupting files. To address this forward error
+correction is done after archiving, compressing and encrypting. For forward
+error correction, I used the the par2 command line tool. It is well
+understood and works across Windows, Mac and Linux.
+
+The main tools that this script uses are "tar", "xz" (selecting maximum
+compression), "gpg" and "par2". All of these run across Windows, Linux and
+Mac OS, and I can hand compile them on all three platforms.
+
+This shell script bails out if any command returns a failure, the bash "-e"
+option. If I am creating an encrypted archive, I want to know all steps were
+successful.
+
+EXAMPLES
+
+    $ archivedirectory -d /mybackups -e ./directory_or_file_to_archive
+
+This will create a time and date stamped directory in /mybackups that includes
+the original name, in that directory will be the gpg encrypted compressed tar
+file and the par2 recovery files. par2 is set at 100 percent. This script will
+append to a file called "archive_list" in the chosen backup directory,
+/mybackups in this example a line with the name of the encrypted archive and
+the password. The user needs to manually backup these passwords in a safe
+place, such as a password vault.
+
+Most often, I just archive with encryption, and then remove the original
+directory:
+
+    $ archivedirectory -e some_directory_to_archive
+    $ rm -rf some_directory_to_archive
+
+I can periodically check the backup directory via cron with
+
+    $ find . -type d -exec bash -c "cd \\"{}\\" && pwd && sh -c
+    \\"par2 verify -qq *.gpg\\"" \;
+
+MANUAL_PAGE
+exit 1
+}
+
+unset DISPLAY
+export ENCRYPT_ARCHIVE=0
+export ARCHIVE_TO="$HOME/files/backups"
+export NICE=""
+export ARCHIVE_PREFIX=""
+
+echo
+# get the arguments
+while [[ $# > 1 ]]
+do
+    key="$1"
+
+    case $key in
+        -d|--directory)
+            ARCHIVE_TO="$2"
+            echo "Resulting archive will be stored in the directory $2"
+            echo
+            shift # past argument
+            ;;
+        -e|--encrypt)
+            ENCRYPT_ARCHIVE=1
+            echo "Archive will be encrypted"
+            ;;
+        -n|--nice)
+            NICE=nice
+            echo "Running nice on processes"
+            ;;
+        -p|--prefix)
+            # add an underscore to the prefix for clarity
+            ARCHIVE_PREFIX="$2""_"
+            echo "Adding prefix $ARCHIVE_PREFIX to the archive name"
+            echo
+            shift # past argument
+            ;;
+        -h|--help)
+            man
+            ;;
+        *)
+            die "Unknown option $key"
+            ;;
+    esac
+    shift;
+done
+
+[ $# -ge 1 ] || die "Need to specify a directory or file to archive"
+[ -e "$1" ] || die "Need to specify a directory or file to archive, $1 does not exist"
+
+export HOSTNAME
+if [ x"$HOSTNAME" == x ]
+then
+    export HOSTNAME=`hostname -s 2> /dev/null`
+    if [ x"$HOSTNAME" == x ]
+    then
+        export HOSTNAME=`hostname 2> /dev/null`
+        if [ x"$HOSTNAME" == x ]
+        then
+            export HOSTNAME=`uname -n 2> /dev/null`
+            if [ x"$HOSTNAME" == x ]
+            then
+                HOSTNAME=unknown
+            fi
+        fi
+    fi
+fi
+export HOSTNAME
+# remove any trailing slash
+export TMP_FROM="${1%/}"
+# remove ./ prefix if it exists
+export ARCHIVE_FROM="${TMP_FROM#./}"
+export ARCHIVE_BASE="$ARCHIVE_PREFIX""$ARCHIVE_FROM"'_'"$HOSTNAME"'_'`date +'%y%m%d_%H.%M.%S'`
+export ARCHIVE_NAME="$ARCHIVE_BASE"'.tar.xz'
+# The full path to the directory where the archive will be built
+export ARCHIVE_TO_DIR="$ARCHIVE_TO/$ARCHIVE_BASE"
+# The full path to the GPG archive if encrypted or just the tarball if not encrypted
+export ARCHIVE_FULL_PATH="$ARCHIVE_TO_DIR/$ARCHIVE_NAME"
+
+echo "Creating the archive from      : $ARCHIVE_FROM"
+echo "Archive directory will be      : $ARCHIVE_TO_DIR"
+if [ $ENCRYPT_ARCHIVE -eq 1 ]
+then
+    export ARCHIVE_LIST="$ARCHIVE_TO/archive_list"
+    export ARCHIVE_GPG="$ARCHIVE_FULL_PATH"'.gpg'
+    export ARCHIVE_PAR2="$ARCHIVE_GPG"'.par2'
+    export ARCHIVE_PASSWD=`perl -e'my @set = ('"'"'0'"'"' .. '"'"'9'"'"', '"'"'A'"'"' .. '"'"'Z'"'"', '"'"'a'"'"' .. '"'"'z'"'"'); my \$passwd = join '"'"''"'"' => map \$set[rand @set], 1 .. 63; print \$passwd;'`
+    echo "Full path to encrypted archive : $ARCHIVE_GPG"
+    echo "Password will be appended to   : $ARCHIVE_LIST"
+    echo "Archive password will be       : $ARCHIVE_PASSWD"
+else
+    export ARCHIVE_PAR2="$ARCHIVE_FULL_PATH"'.par2'
+fi
+echo
+echo
+sleep 5
+set -x
+
+mkdir -p "$ARCHIVE_TO"
+[ -d "$ARCHIVE_TO" ] || die "Directory to archive to does not exist"
+mkdir -p "$ARCHIVE_TO_DIR"
+[ -d "$ARCHIVE_TO_DIR" ] || die "Can not create $ARCHIVE_TO_DIR"
+[ ! -f "$ARCHIVE_FULL_PATH" ] || die "Archive $ARCHIVE_FULL_PATH already exists"
+[ ! -f "$ARCHIVE_PAR2" ] || die "Archive PAR2 $ARCHIVE_PAR2 already exists"
+$NICE tar cf - "$ARCHIVE_FROM" | $NICE xz -T 0 -9 -c - > "$ARCHIVE_FULL_PATH"
+set +x
+echo
+echo "Tar archive was succesfully created, creating the README"
+echo
+set -x
+
+# save the location to the directory or file that we are archiving
+pushd "$ARCHIVE_TO_DIR"
+
+if [ $ENCRYPT_ARCHIVE -eq 1 ]
+then
+    [ ! -f "$ARCHIVE_GPG" ] || die "Archive GPG $ARCHIVE_GPG already exists"
+cat > "$ARCHIVE_TO_DIR"/README.txt << README_ENCRYPT
+
+This directory contains files and/or directories that have been archived with
+tar, with gpg encryption and par2 forward error correction applied.  PAR2 is
+the old Usenet parity 2 format, which provides protection against bit rot. This
+seems to be a way to portably archive data across Windows, MacOS and Linux,
+even older versions of Linux. To restore the files, the command line will be:
+
+gpg --decrypt $ARCHIVE_GPG | tar xfJ -
+
+You can check the archives integrity with:
+
+par2 verify $ARCHIVE_PAR2
+
+Original directory archived from : $ARCHIVE_FROM
+Original archive was created in  : $ARCHIVE_TO_DIR
+
+README_ENCRYPT
+    set +x
+    echo
+    /bin/ls -lhd "$ARCHIVE_FULL_PATH"
+    echo
+    echo "README was successfully created, creating the GPG file from the tar achive."
+    echo
+    set -x
+    # We do not want to store the password until it is likely
+    # that we have created a good GPG archive.
+    echo "$ARCHIVE_PASSWD" | $NICE gpg --batch --no-tty --yes --passphrase-fd 0 --cipher-algo AES256 --symmetric "$ARCHIVE_NAME"
+    set +x
+    echo
+    echo "GPG file was successfully created, adding the password to the archive list"
+    echo
+    set -x
+    echo "$ARCHIVE_GPG $ARCHIVE_PASSWD" >> "$ARCHIVE_LIST"
+    echo
+    /bin/ls -lh "$ARCHIVE_TO_DIR"
+    echo
+    $NICE par2 create -r100 "$ARCHIVE_GPG"
+    echo
+    /bin/ls -lh "$ARCHIVE_TO_DIR"
+    echo
+    $NICE par2 verify "$ARCHIVE_PAR2"
+    echo
+    echo "$ARCHIVE_PASSWD" | gpg --batch --no-tty --yes --passphrase-fd 0 --decrypt "$ARCHIVE_GPG" | tar tfJ -
+    /bin/rm -f "$ARCHIVE_FULL_PATH"
+else
+cat > "$ARCHIVE_TO_DIR"/README.txt << README_NONENCRYPT
+
+This directory contains files and/or directories that have been archived with
+tar and forward error correction.  Forward error correction is applied using
+PAR2. PAR2 is the old Usenet parity 2 format, which provides protection against
+bit rot. This seems to be a way to portably archive data across Windows, MacOS
+and Linux, even older versions of Linux. To restore the files, the command line
+will be:
+
+tar xfJ $ARCHIVE_FULL_PATH
+
+You can check the archives integrity with:
+
+par2 verify $ARCHIVE_PAR2
+
+Original directory archived from : $ARCHIVE_FROM
+Original archive was created in  : $ARCHIVE_TO_DIR
+
+README_NONENCRYPT
+    set +x
+    echo
+    echo "README was successfully created, creating the PAR2 files"
+    echo
+    set -x
+    par2 create -r100 "$ARCHIVE_FULL_PATH"
+    par2 verify "$ARCHIVE_PAR2"
+    echo
+fi
+
+set +x
+echo
+/bin/ls -lh "$ARCHIVE_TO_DIR"
+echo
+echo "Switching back to starting directory"
+echo
+
+popd
+
+echo
+echo Original directory size
+echo
+# du is in different places across Linux distributions, rely on the path to
+# find it.
+du -sh "$ARCHIVE_FROM"
+echo
+echo "Switching to archive directory"
+echo
+
+pushd "$ARCHIVE_TO_DIR"
+
+echo
+echo Archive directory size
+echo
+du -sh "$ARCHIVE_TO_DIR"
+echo
+echo "Archive --$ARCHIVE_FROM-- was built successfully, we are DONE."
+echo
+exit 0

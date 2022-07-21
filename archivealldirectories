@@ -1,0 +1,13 @@
+#!/bin/bash
+# Archive all the directories in the current directory
+set -ex
+find . -depth -maxdepth 1 -type d -print | while read i
+do
+    echo "-----------------------------------------------"
+    /home/edt/bin/archivedirectory -p "backups2_centos_home_edt_files_work" --encrypt "$i"
+    /bin/rm -rf "$i"
+    echo "Done with $i."
+    echo "-----------------------------------------------"
+    echo " "
+    echo " "
+done
