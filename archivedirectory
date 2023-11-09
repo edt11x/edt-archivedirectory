@@ -225,13 +225,14 @@ echo
 sleep 5
 set -x
 
+# tar cpf - create, preserve permissions, file
 mkdir -p "$ARCHIVE_TO"
 [ -d "$ARCHIVE_TO" ] || die "Directory to archive to does not exist"
 mkdir -p "$ARCHIVE_TO_DIR"
 [ -d "$ARCHIVE_TO_DIR" ] || die "Can not create $ARCHIVE_TO_DIR"
 [ ! -f "$ARCHIVE_FULL_PATH" ] || die "Archive $ARCHIVE_FULL_PATH already exists"
 [ ! -f "$ARCHIVE_PAR2" ] || die "Archive PAR2 $ARCHIVE_PAR2 already exists"
-$NICE tar cf - "$ARCHIVE_FROM" | $NICE xz -T 0 -9 -c - > "$ARCHIVE_FULL_PATH"
+$NICE tar cpf - "$ARCHIVE_FROM" | $NICE xz -T 0 -9 -c - > "$ARCHIVE_FULL_PATH"
 set +x
 echo
 echo "Tar archive was succesfully created, creating the README"
@@ -252,7 +253,7 @@ the old Usenet parity 2 format, which provides protection against bit rot. This
 seems to be a way to portably archive data across Windows, MacOS and Linux,
 even older versions of Linux. To restore the files, the command line will be:
 
-gpg --decrypt $ARCHIVE_GPG | tar xfJ -
+gpg --decrypt $ARCHIVE_GPG | tar xpfJ -
 
 You can check the archives integrity with:
 
@@ -299,7 +300,7 @@ bit rot. This seems to be a way to portably archive data across Windows, MacOS
 and Linux, even older versions of Linux. To restore the files, the command line
 will be:
 
-tar xfJ $ARCHIVE_FULL_PATH
+tar xpfJ $ARCHIVE_FULL_PATH
 
 You can check the archives integrity with:
 
