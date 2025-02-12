@@ -26,6 +26,7 @@ SYNOPSIS
 
     archivedirectory [-d dest_dir] [-p prefix] [-e] [-n] dir_or_file_to_archive
 
+    -b -- base64 encode the resulting file
     -d directory -- specify the destination dir to place the archive
     -e -- encrypt the archive, otherwise just tar and forward ECC
     -n -- nice the processes, some processes are intensive
@@ -132,6 +133,7 @@ exit 1
 
 unset DISPLAY
 export ENCRYPT_ARCHIVE=0
+export BASE64_ENCODE=0
 export ARCHIVE_TO="$HOME/files/backups"
 export NICE=""
 export ARCHIVE_PREFIX=""
@@ -143,6 +145,10 @@ do
     key="$1"
 
     case $key in
+        -b|--base64)
+            BASE64_ENCODE=1
+            echo "We will base64 encode the resulting archive"
+            ;;
         -d|--directory)
             ARCHIVE_TO="$2"
             echo "Resulting archive will be stored in the directory $2"
@@ -290,6 +296,10 @@ README_ENCRYPT
     echo
     echo "$ARCHIVE_PASSWD" | gpg --batch --no-tty --yes --passphrase-fd 0 --decrypt "$ARCHIVE_GPG" | tar tfJ -
     /bin/rm -f "$ARCHIVE_FULL_PATH"
+    if [ $BASE64_ENCODE -eq 1 ]
+    then
+        base64 "$ARCHIVE_GPG" > "$ARCHIVE_TO/$ARCHIVE_BASE"'.txt'
+    fi
 else
 cat > "$ARCHIVE_TO_DIR"/README.txt << README_NONENCRYPT
 
@@ -318,6 +328,11 @@ README_NONENCRYPT
     par2 create -r100 "$ARCHIVE_FULL_PATH"
     par2 verify "$ARCHIVE_PAR2"
     echo
+
+    if [ $BASE64_ENCODE -eq 1 ]
+    then
+        base64 "$ARCHIVE_FULL_PATH" > "$ARCHIVE_TO/$ARCHIVE_BASE"'.txt'
+    fi
 fi
 
 set +x
