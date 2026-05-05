@@ -15,7 +15,7 @@ die_usage() {
 
 function usage {
     set +x
-    echo "Usage: archivedirectory [-b] [-d dest_dir] [-e] [-n] [-p prefix] [--ssh host] [-h] dir_or_file_to_archive"
+    echo "Usage: archivedirectory [-b] [-d dest_dir] [-e] [-n] [-p prefix] [--ssh host] [--exclude PATTERN] [--exclude-from FILE] [--ignore-tar-errors] [-h] dir_or_file_to_archive"
     exit 1
 }
 
@@ -28,15 +28,24 @@ NAME
 
 SYNOPSIS
 
-    archivedirectory [-b] [-d dest_dir] [-e] [-n] [-p prefix] [--ssh host] [-h] dir_or_file_to_archive
+    archivedirectory [-b] [-d dest_dir] [-e] [-n] [-p prefix] [--ssh host]
+                     [--exclude PATTERN] [--exclude-from FILE]
+                     [--ignore-tar-errors] [-h] dir_or_file_to_archive
 
-    -b              -- base64 encode the resulting file
-    -d directory    -- specify the destination dir to place the archive
-    -e              -- encrypt the archive, otherwise just tar and forward ECC
-    -h              -- display this help page
-    -n              -- nice the processes, some processes are intensive
-    -p prefix_name  -- add a prefix name to the archive
-    --ssh host      -- create the archive on a remote host over SSH
+    -b                     -- base64 encode the resulting file
+    -d directory           -- specify the destination dir to place the archive
+    -e                     -- encrypt the archive, otherwise just tar and forward ECC
+    -h                     -- display this help page
+    -n                     -- nice the processes, some processes are intensive
+    -p prefix_name         -- add a prefix name to the archive
+    --ssh host             -- create the archive on a remote host over SSH
+    --exclude PATTERN      -- exclude files matching PATTERN (same syntax as tar --exclude;
+                              may be repeated for multiple patterns)
+    --exclude=PATTERN      -- alternate form of --exclude
+    --exclude-from FILE    -- read exclude patterns from FILE (same as tar --exclude-from)
+    --ignore-tar-errors    -- continue if tar cannot read some files (e.g. permission
+                              denied); those files are skipped and warnings are printed,
+                              but the archive is still created and the script continues
 
 DESCRIPTION
 
@@ -189,6 +198,8 @@ ARCHIVE_TO_EXPLICIT=0
 NICE=""
 ARCHIVE_PREFIX=""
 SSH_HOST=""
+IGNORE_TAR_ERRORS=0
+TAR_EXCLUDE_ARGS=()
 
 echo
 # get the arguments
@@ -228,6 +239,28 @@ do
             echo "Creating archive on remote host $SSH_HOST"
             echo
             shift # past argument
+            ;;
+        --exclude)
+            TAR_EXCLUDE_ARGS+=("--exclude=$2")
+            echo "Excluding pattern: $2"
+            shift # past argument
+            ;;
+        --exclude=*)
+            TAR_EXCLUDE_ARGS+=("$key")
+            echo "Excluding pattern: ${key#--exclude=}"
+            ;;
+        --exclude-from)
+            TAR_EXCLUDE_ARGS+=("--exclude-from=$2")
+            echo "Excluding patterns from file: $2"
+            shift # past argument
+            ;;
+        --exclude-from=*)
+            TAR_EXCLUDE_ARGS+=("$key")
+            echo "Excluding patterns from file: ${key#--exclude-from=}"
+            ;;
+        --ignore-tar-errors)
+            IGNORE_TAR_ERRORS=1
+            echo "Ignoring non-fatal tar errors (files unreadable due to permissions will be skipped)"
             ;;
         -h|--help)
             show_manual
@@ -316,11 +349,23 @@ on_target "mkdir -p '$ARCHIVE_TO_DIR'"
 on_target "[ -d '$ARCHIVE_TO_DIR' ]" || die "Can not create $ARCHIVE_TO_DIR"
 on_target "[ ! -f '$ARCHIVE_FULL_PATH' ]" || die "Archive $ARCHIVE_FULL_PATH already exists"
 on_target "[ ! -f '$ARCHIVE_PAR2' ]" || die "Archive PAR2 $ARCHIVE_PAR2 already exists"
+set +e
 if [[ -n "$SSH_HOST" ]]; then
-    $NICE tar cpf - "$ARCHIVE_FROM" | ssh "$SSH_HOST" "$NICE xz -T 0 -9 -c - > '$ARCHIVE_FULL_PATH'"
+    $NICE tar cpf - "${TAR_EXCLUDE_ARGS[@]}" "$ARCHIVE_FROM" | ssh "$SSH_HOST" "$NICE xz -T 0 -9 -c - > '$ARCHIVE_FULL_PATH'"
+    PIPE_STATUSES=("${PIPESTATUS[@]}")
 else
-    $NICE tar cpf - "$ARCHIVE_FROM" | $NICE xz -T 0 -9 -c - > "$ARCHIVE_FULL_PATH"
+    $NICE tar cpf - "${TAR_EXCLUDE_ARGS[@]}" "$ARCHIVE_FROM" | $NICE xz -T 0 -9 -c - > "$ARCHIVE_FULL_PATH"
+    PIPE_STATUSES=("${PIPESTATUS[@]}")
 fi
+set -e
+TAR_STATUS=${PIPE_STATUSES[0]}
+COMPRESS_STATUS=${PIPE_STATUSES[1]}
+if [[ $IGNORE_TAR_ERRORS -eq 1 && $TAR_STATUS -le 1 ]]; then
+    [[ $TAR_STATUS -eq 0 ]] || echo >&2 "Warning: tar reported non-fatal errors (some files skipped due to permissions)"
+elif [[ $TAR_STATUS -ne 0 ]]; then
+    die "tar failed with exit code $TAR_STATUS"
+fi
+[[ $COMPRESS_STATUS -eq 0 ]] || die "Compression/transfer failed with exit code $COMPRESS_STATUS"
 set +x
 echo
 echo "Tar archive was succesfully created, creating the README"
