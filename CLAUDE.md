@@ -6,7 +6,7 @@ A single-file Bash script (`archivedirectory`) that creates secure, portable,
 corruption-resistant archives. It combines `tar` + `xz` + `gpg` + `par2` into
 one workflow. The embedded manual page (`-h`) is the authoritative reference.
 
-## Session history (2026-05-05)
+## Session history (2026-05-05 — continued)
 
 A full code review was performed. All medium and cosmetic issues were fixed,
 plus two high-priority issues. Summary of changes made:
@@ -39,6 +39,39 @@ plus two high-priority issues. Summary of changes made:
   three password-touching operations: `gpg --symmetric`, the `archive_list`
   write, and `gpg --decrypt` verification. `set -x` is only active for `par2`.
 - **Help text updated** — `-h` option added to SYNOPSIS and options list.
+
+### SSH remote archiving (--ssh host)
+
+A new `--ssh host` option streams the archive directly to a remote host over
+SSH with no local disk usage. Design decisions:
+
+- **`on_target()` helper** — all target-side commands (mkdir, ls, par2, rm,
+  du, etc.) go through `on_target "cmd string"` which either runs via
+  `ssh $SSH_HOST "..."` or `bash -c "..."` locally. This keeps the code path
+  identical for both modes.
+- **Tar pipe** — `tar cpf - src | ssh host "xz ... > dest"` streams the data.
+  A separate conditional handles local vs SSH for this step because the pipe
+  topology differs.
+- **GPG now uses `--output`** — removed the `pushd`/`popd` pattern; GPG
+  explicitly specifies `--output $ARCHIVE_GPG` so it works with full paths
+  regardless of cwd.
+- **Password security over SSH** — GPG and archive_list writes pipe the
+  password through stdin (`echo "$PASSWD" | ssh host "gpg --passphrase-fd 0
+  ..."`) so the password never appears in SSH command-line arguments.
+- **Remote home resolution** — if `--ssh` is given without `-d`, the script
+  queries `ssh host 'echo "$HOME"'` and sets ARCHIVE_TO to that remote path
+  before computing all derived paths.
+- **Cleanup trap** — extended to `ssh $SSH_HOST "rm -rf ..."` when in SSH
+  mode so partial remote archive directories are removed on failure.
+- **README content** — built locally via `$(cat << HEREDOC)` (variables expand
+  locally), then piped to `ssh host "cat > file"` in SSH mode.
+- **par2 invocation** — uses `cd $ARCHIVE_TO_DIR && par2 create basename`
+  pattern (via on_target) to avoid any working-directory dependency.
+- **`ARCHIVE_TO_EXPLICIT` flag** — tracks whether `-d` was explicitly set, to
+  distinguish "use remote home" from "user-specified path".
+- **ControlMaster note** — the script makes many SSH calls; users should add
+  `ControlMaster auto` / `ControlPersist` to `~/.ssh/config` for the backup
+  host to reuse the connection and avoid repeated handshakes.
 
 ### Known remaining issue
 - **Plaintext `archive_list`** — `$dest_dir/archive_list` stores

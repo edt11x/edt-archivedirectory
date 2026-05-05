@@ -15,7 +15,7 @@ die_usage() {
 
 function usage {
     set +x
-    echo "Usage: archivedirectory [-d dest_dir] [-p prefix] [-e] [-n] dir_or_file_to_archive"
+    echo "Usage: archivedirectory [-b] [-d dest_dir] [-e] [-n] [-p prefix] [--ssh host] [-h] dir_or_file_to_archive"
     exit 1
 }
 
@@ -28,14 +28,15 @@ NAME
 
 SYNOPSIS
 
-    archivedirectory [-b] [-d dest_dir] [-e] [-n] [-p prefix] [-h] dir_or_file_to_archive
+    archivedirectory [-b] [-d dest_dir] [-e] [-n] [-p prefix] [--ssh host] [-h] dir_or_file_to_archive
 
-    -b -- base64 encode the resulting file
-    -d directory -- specify the destination dir to place the archive
-    -e -- encrypt the archive, otherwise just tar and forward ECC
-    -h -- display this help page
-    -n -- nice the processes, some processes are intensive
-    -p prefix_name -- add a prefix name to the archive
+    -b              -- base64 encode the resulting file
+    -d directory    -- specify the destination dir to place the archive
+    -e              -- encrypt the archive, otherwise just tar and forward ECC
+    -h              -- display this help page
+    -n              -- nice the processes, some processes are intensive
+    -p prefix_name  -- add a prefix name to the archive
+    --ssh host      -- create the archive on a remote host over SSH
 
 DESCRIPTION
 
@@ -82,7 +83,7 @@ have had problems extracting complicated zip archives on Linux, finding that I
 could not extract some directories or files. Zip files abillity to correctly
 restore file attributes like ownership and mode is also less supported on
 Linux. WinZip on the other hand does understand tar files and tar is native to
-Mac and Linux systems. Tar is the chosen common format. 
+Mac and Linux systems. Tar is the chosen common format.
 
 With all the malware, comprimises, etc. I think all data needs to be encrypted
 at rest. You can not know if a computer or network has been comprimised. The
@@ -109,6 +110,23 @@ This shell script bails out if any command returns a failure, the bash "-e"
 option. If I am creating an encrypted archive, I want to know all steps were
 successful.
 
+** Remote archiving over SSH **
+
+With --ssh, the local directory is streamed directly to the remote host via
+SSH. No local disk space is used for the archive, par2, or any other output
+files. The tar data is piped through SSH and compressed on the remote side;
+GPG encryption, PAR2 forward error correction, and all verification steps also
+run on the remote host.
+
+The remote host must have xz, gpg (if -e is used), par2, and perl installed.
+Standard SSH key-based authentication is assumed. Add ~/.ssh/config entries
+(ControlMaster, ControlPersist, etc.) to reuse the connection across the many
+SSH calls this script makes.
+
+The archive is placed under \$HOME/files/backups on the remote host (using the
+remote user's home directory) unless -d specifies a different path. The archive
+name embeds the local hostname so that the source machine is identifiable.
+
 EXAMPLES
 
     $ archivedirectory -d /mybackups -e ./directory_or_file_to_archive
@@ -126,6 +144,10 @@ directory:
 
     $ archivedirectory -e some_directory_to_archive
     $ rm -rf some_directory_to_archive
+
+Archive directly to a remote host over SSH, no local disk space consumed:
+
+    $ archivedirectory --ssh backupserver -e ./directory_to_archive
 
 I can periodically check the backup directory via cron with
 
@@ -147,13 +169,26 @@ check_deps() {
     fi
 }
 
+# Run a shell command string on the target (remote via SSH, or locally via bash -c).
+# All target-side operations go through this function so that the same code path
+# works both locally and over SSH.
+on_target() {
+    if [[ -n "$SSH_HOST" ]]; then
+        ssh "$SSH_HOST" "$1"
+    else
+        bash -c "$1"
+    fi
+}
+
 unset DISPLAY
 check_deps
 ENCRYPT_ARCHIVE=0
 BASE64_ENCODE=0
 ARCHIVE_TO="$HOME/files/backups"
+ARCHIVE_TO_EXPLICIT=0
 NICE=""
 ARCHIVE_PREFIX=""
+SSH_HOST=""
 
 echo
 # get the arguments
@@ -168,6 +203,7 @@ do
             ;;
         -d|--directory)
             ARCHIVE_TO="$2"
+            ARCHIVE_TO_EXPLICIT=1
             echo "Resulting archive will be stored in the directory $2"
             echo
             shift # past argument
@@ -187,6 +223,12 @@ do
             echo
             shift # past argument
             ;;
+        --ssh)
+            SSH_HOST="$2"
+            echo "Creating archive on remote host $SSH_HOST"
+            echo
+            shift # past argument
+            ;;
         -h|--help)
             show_manual
             ;;
@@ -199,6 +241,13 @@ done
 
 [ $# -ge 1 ] || die_usage "Need to specify a directory or file to archive"
 [ -e "$1" ] || die_usage "Need to specify a directory or file to archive, $1 does not exist"
+
+# If SSH mode and no explicit -d was given, resolve the remote home directory
+# so that the default backup path lands under $HOME on the remote, not locally.
+if [[ -n "$SSH_HOST" && $ARCHIVE_TO_EXPLICIT -eq 0 ]]; then
+    REMOTE_HOME=$(ssh "$SSH_HOST" 'echo "$HOME"')
+    ARCHIVE_TO="$REMOTE_HOME/files/backups"
+fi
 
 export HOSTNAME
 if [ x"$HOSTNAME" == x ]
@@ -229,11 +278,20 @@ ARCHIVE_NAME="${ARCHIVE_BASE}.tar.xz"
 ARCHIVE_TO_DIR="$ARCHIVE_TO/$ARCHIVE_BASE"
 # The full path to the GPG archive if encrypted or just the tarball if not encrypted
 ARCHIVE_FULL_PATH="$ARCHIVE_TO_DIR/$ARCHIVE_NAME"
-cleanup() { [[ -n "${ARCHIVE_TO_DIR:-}" ]] && rm -rf "$ARCHIVE_TO_DIR"; }
+cleanup() {
+    if [[ -n "${ARCHIVE_TO_DIR:-}" ]]; then
+        if [[ -n "${SSH_HOST:-}" ]]; then
+            ssh "${SSH_HOST}" "rm -rf '${ARCHIVE_TO_DIR}'" 2>/dev/null || true
+        else
+            rm -rf "$ARCHIVE_TO_DIR"
+        fi
+    fi
+}
 trap cleanup ERR
 
 echo "Creating the archive from      : $ARCHIVE_FROM"
 echo "Archive directory will be      : $ARCHIVE_TO_DIR"
+[[ -n "$SSH_HOST" ]] && echo "Archive will be built on host   : $SSH_HOST"
 if [ $ENCRYPT_ARCHIVE -eq 1 ]
 then
     ARCHIVE_LIST="$ARCHIVE_TO/archive_list"
@@ -252,26 +310,27 @@ sleep 5
 set -x
 
 # tar cpf - create, preserve permissions, file
-mkdir -p "$ARCHIVE_TO"
-[ -d "$ARCHIVE_TO" ] || die "Directory to archive to does not exist"
-mkdir -p "$ARCHIVE_TO_DIR"
-[ -d "$ARCHIVE_TO_DIR" ] || die "Can not create $ARCHIVE_TO_DIR"
-[ ! -f "$ARCHIVE_FULL_PATH" ] || die "Archive $ARCHIVE_FULL_PATH already exists"
-[ ! -f "$ARCHIVE_PAR2" ] || die "Archive PAR2 $ARCHIVE_PAR2 already exists"
-$NICE tar cpf - "$ARCHIVE_FROM" | $NICE xz -T 0 -9 -c - > "$ARCHIVE_FULL_PATH"
+on_target "mkdir -p '$ARCHIVE_TO'"
+on_target "[ -d '$ARCHIVE_TO' ]" || die "Directory to archive to does not exist"
+on_target "mkdir -p '$ARCHIVE_TO_DIR'"
+on_target "[ -d '$ARCHIVE_TO_DIR' ]" || die "Can not create $ARCHIVE_TO_DIR"
+on_target "[ ! -f '$ARCHIVE_FULL_PATH' ]" || die "Archive $ARCHIVE_FULL_PATH already exists"
+on_target "[ ! -f '$ARCHIVE_PAR2' ]" || die "Archive PAR2 $ARCHIVE_PAR2 already exists"
+if [[ -n "$SSH_HOST" ]]; then
+    $NICE tar cpf - "$ARCHIVE_FROM" | ssh "$SSH_HOST" "$NICE xz -T 0 -9 -c - > '$ARCHIVE_FULL_PATH'"
+else
+    $NICE tar cpf - "$ARCHIVE_FROM" | $NICE xz -T 0 -9 -c - > "$ARCHIVE_FULL_PATH"
+fi
 set +x
 echo
 echo "Tar archive was succesfully created, creating the README"
 echo
-set -x
-
-# save the location to the directory or file that we are archiving
-pushd "$ARCHIVE_TO_DIR"
 
 if [ $ENCRYPT_ARCHIVE -eq 1 ]
 then
-    [ ! -f "$ARCHIVE_GPG" ] || die "Archive GPG $ARCHIVE_GPG already exists"
-cat > "$ARCHIVE_TO_DIR"/README.txt << README_ENCRYPT
+    on_target "[ ! -f '$ARCHIVE_GPG' ]" || die "Archive GPG $ARCHIVE_GPG already exists"
+    # Build README content locally (variables expand here), then write to target
+    README_CONTENT=$(cat << README_ENCRYPT
 
 This directory contains files and/or directories that have been archived with
 tar, with gpg encryption and par2 forward error correction applied.  PAR2 is
@@ -289,38 +348,59 @@ Original directory archived from : $ARCHIVE_FROM
 Original archive was created in  : $ARCHIVE_TO_DIR
 
 README_ENCRYPT
+)
+    if [[ -n "$SSH_HOST" ]]; then
+        echo "$README_CONTENT" | ssh "$SSH_HOST" "cat > '$ARCHIVE_TO_DIR/README.txt'"
+    else
+        echo "$README_CONTENT" > "$ARCHIVE_TO_DIR/README.txt"
+    fi
     echo
-    /bin/ls -lhd "$ARCHIVE_FULL_PATH"
+    on_target "/bin/ls -lhd '$ARCHIVE_FULL_PATH'"
     echo
-    echo "README was successfully created, creating the GPG file from the tar achive."
+    echo "README was successfully created, creating the GPG file from the tar archive."
     echo
-    set +x
+    # set +x remains active through all password-touching operations below
     # We do not want to store the password until it is likely
     # that we have created a good GPG archive.
-    echo "$ARCHIVE_PASSWD" | $NICE gpg --batch --no-tty --yes --passphrase-fd 0 --cipher-algo AES256 --symmetric "$ARCHIVE_NAME"
+    # --output is used so GPG does not depend on the current working directory.
+    if [[ -n "$SSH_HOST" ]]; then
+        echo "$ARCHIVE_PASSWD" | ssh "$SSH_HOST" "$NICE gpg --batch --no-tty --yes --passphrase-fd 0 --cipher-algo AES256 --output '$ARCHIVE_GPG' --symmetric '$ARCHIVE_FULL_PATH'"
+    else
+        echo "$ARCHIVE_PASSWD" | $NICE gpg --batch --no-tty --yes --passphrase-fd 0 --cipher-algo AES256 --output "$ARCHIVE_GPG" --symmetric "$ARCHIVE_FULL_PATH"
+    fi
     echo
     echo "GPG file was successfully created, adding the password to the archive list"
     echo
-    echo "$ARCHIVE_GPG $ARCHIVE_PASSWD" >> "$ARCHIVE_LIST"
+    # Pipe password via stdin so it does not appear in process arguments
+    if [[ -n "$SSH_HOST" ]]; then
+        echo "$ARCHIVE_GPG $ARCHIVE_PASSWD" | ssh "$SSH_HOST" "cat >> '$ARCHIVE_LIST'"
+    else
+        echo "$ARCHIVE_GPG $ARCHIVE_PASSWD" >> "$ARCHIVE_LIST"
+    fi
     echo
-    /bin/ls -lh "$ARCHIVE_TO_DIR"
+    on_target "/bin/ls -lh '$ARCHIVE_TO_DIR'"
     echo
     set -x
-    $NICE par2 create -r100 "$ARCHIVE_GPG"
+    on_target "cd '$ARCHIVE_TO_DIR' && $NICE par2 create -r100 '${ARCHIVE_GPG##*/}'"
     echo
-    /bin/ls -lh "$ARCHIVE_TO_DIR"
+    on_target "/bin/ls -lh '$ARCHIVE_TO_DIR'"
     echo
-    $NICE par2 verify "$ARCHIVE_PAR2"
+    on_target "cd '$ARCHIVE_TO_DIR' && $NICE par2 verify '${ARCHIVE_PAR2##*/}'"
     set +x
     echo
-    echo "$ARCHIVE_PASSWD" | $NICE gpg --batch --no-tty --yes --passphrase-fd 0 --decrypt "$ARCHIVE_GPG" | tar tfJ -
-    /bin/rm -f "$ARCHIVE_FULL_PATH"
+    if [[ -n "$SSH_HOST" ]]; then
+        echo "$ARCHIVE_PASSWD" | ssh "$SSH_HOST" "$NICE gpg --batch --no-tty --yes --passphrase-fd 0 --decrypt '$ARCHIVE_GPG' | tar tfJ -"
+    else
+        echo "$ARCHIVE_PASSWD" | $NICE gpg --batch --no-tty --yes --passphrase-fd 0 --decrypt "$ARCHIVE_GPG" | tar tfJ -
+    fi
+    on_target "/bin/rm -f '$ARCHIVE_FULL_PATH'"
     if [ $BASE64_ENCODE -eq 1 ]
     then
-        base64 "$ARCHIVE_GPG" > "$ARCHIVE_TO/$ARCHIVE_BASE"'.txt'
+        on_target "base64 '$ARCHIVE_GPG' > '$ARCHIVE_TO/$ARCHIVE_BASE.txt'"
     fi
 else
-cat > "$ARCHIVE_TO_DIR"/README.txt << README_NONENCRYPT
+    # Build README content locally (variables expand here), then write to target
+    README_CONTENT=$(cat << README_NONENCRYPT
 
 This directory contains files and/or directories that have been archived with
 tar and forward error correction.  Forward error correction is applied using
@@ -339,29 +419,31 @@ Original directory archived from : $ARCHIVE_FROM
 Original archive was created in  : $ARCHIVE_TO_DIR
 
 README_NONENCRYPT
-    set +x
+)
+    if [[ -n "$SSH_HOST" ]]; then
+        echo "$README_CONTENT" | ssh "$SSH_HOST" "cat > '$ARCHIVE_TO_DIR/README.txt'"
+    else
+        echo "$README_CONTENT" > "$ARCHIVE_TO_DIR/README.txt"
+    fi
     echo
     echo "README was successfully created, creating the PAR2 files"
     echo
     set -x
-    $NICE par2 create -r100 "$ARCHIVE_FULL_PATH"
-    $NICE par2 verify "$ARCHIVE_PAR2"
+    on_target "cd '$ARCHIVE_TO_DIR' && $NICE par2 create -r100 '${ARCHIVE_FULL_PATH##*/}'"
+    on_target "cd '$ARCHIVE_TO_DIR' && $NICE par2 verify '${ARCHIVE_PAR2##*/}'"
+    set +x
     echo
 
     if [ $BASE64_ENCODE -eq 1 ]
     then
-        base64 "$ARCHIVE_FULL_PATH" > "$ARCHIVE_TO/$ARCHIVE_BASE"'.txt'
+        on_target "base64 '$ARCHIVE_FULL_PATH' > '$ARCHIVE_TO/$ARCHIVE_BASE.txt'"
     fi
 fi
 
 set +x
 echo
-/bin/ls -lh "$ARCHIVE_TO_DIR"
+on_target "/bin/ls -lh '$ARCHIVE_TO_DIR'"
 echo
-echo "Switching back to starting directory"
-echo
-
-popd
 
 echo
 echo Original directory size
@@ -372,7 +454,7 @@ du -sh "$ARCHIVE_FROM"
 echo
 echo Archive directory size
 echo
-du -sh "$ARCHIVE_TO_DIR"
+on_target "du -sh '$ARCHIVE_TO_DIR'"
 echo
 echo "Archive --$ARCHIVE_FROM-- was built successfully, we are DONE."
 echo

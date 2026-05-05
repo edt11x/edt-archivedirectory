@@ -26,7 +26,7 @@ The script checks for all dependencies at startup and exits with a clear error i
 ## Usage
 
 ```
-archivedirectory [-b] [-d dest_dir] [-e] [-n] [-p prefix] [-h] dir_or_file_to_archive
+archivedirectory [-b] [-d dest_dir] [-e] [-n] [-p prefix] [--ssh host] [-h] dir_or_file_to_archive
 
   -b              Base64-encode the resulting archive file
   -d dest_dir     Destination directory (default: $HOME/files/backups)
@@ -34,9 +34,26 @@ archivedirectory [-b] [-d dest_dir] [-e] [-n] [-p prefix] [-h] dir_or_file_to_ar
   -h              Display the full manual page
   -n              Run CPU-intensive processes under nice
   -p prefix       Prepend a prefix string to the archive name
+  --ssh host      Create the archive on a remote host over SSH
 ```
 
 Run `archivedirectory -h` for the full manual page including tool rationale and examples.
+
+## Remote archiving over SSH
+
+With `--ssh`, the local directory is streamed directly to the remote host — no local disk space is used for any output files. The tar data is piped through SSH and compressed on the remote side; GPG encryption, PAR2 forward error correction, and all verification steps also run on the remote host.
+
+```bash
+# Archive to a remote host, encrypted, no local disk space used
+archivedirectory --ssh backupserver -e ./some_directory
+
+# Remote archive to a specific path on the remote
+archivedirectory --ssh backupserver -d /mnt/backup -e ./some_directory
+```
+
+The archive name embeds the **local** hostname so the source machine is identifiable from the remote backup directory. If no `-d` is given, the archive lands under `$HOME/files/backups` on the remote host (the remote user's home, not the local one).
+
+The remote host must have `xz`, `gpg` (if `-e`), `par2`, and `perl` installed. Standard SSH key-based authentication is assumed. For performance, add a `ControlMaster`/`ControlPersist` entry to `~/.ssh/config` for the backup host — the script makes several SSH calls and connection reuse significantly reduces overhead.
 
 ## What gets created
 
