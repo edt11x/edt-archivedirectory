@@ -1,0 +1,15 @@
+# Archives produced by archivedirectory
+*.tar
+*.tar.xz
+*.tar.xz.gpg
+*.par2
+*.txt.b64
+
+# OS clutter
+.DS_Store
+Thumbs.db
+
+# Editor swap/backup files
+*~
+*.swp
+*.swo
